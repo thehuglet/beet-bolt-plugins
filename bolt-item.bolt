@@ -1,0 +1,440 @@
+from beet import Language
+from hashlib import sha512
+
+config = {
+    "path_prefix": ctx.meta.get("bolt-item",{}).get("path_prefix") or "bolt-item/",
+}
+
+component_names = [
+    "attribute_modifiers",
+    # "axolotl/variant",
+    "banner_patterns",
+    "base_color",
+    "bees",
+    "block_entity_data",
+    "block_state",
+    "blocks_attacks",
+    "break_sound",
+    "bucket_entity_data",
+    "bundle_contents",
+    "can_break",
+    "can_place_on",
+    # "cat/collar",
+    # "cat/variant",
+    "charged_projectiles",
+    "consumable",
+    "container",
+    "container_loot",
+    "creative_slot_lock",
+    "custom_data",
+    "custom_model_data",
+    "custom_name",
+    "damage",
+    "damage_resistant",
+    "death_protection",
+    "debug_stick_state",
+    "dyed_color",
+    "enchantable",
+    "enchantment_glint_override",
+    "enchantments",
+    "entity_data",
+    "equippable",
+    "firework_explosion",
+    "fireworks",
+    "food",
+    # "fox/variant",
+    # "frog/variant",
+    "glider",
+    # "horse/variant",
+    "instrument",
+    "intangible_projectile",
+    "item_model",
+    "item_name",
+    "jukebox_playable",
+    # "llama/variant",
+    "lock",
+    "lodestone_tracker",
+    "lore",
+    "map_color",
+    "map_decorations",
+    "map_id",
+    "map_post_processing",
+    "max_damage",
+    "max_stack_size",
+    # "mooshroom/variant",
+    "note_block_sound",
+    "ominous_bottle_amplifier",
+    # "painting/variant",
+    # "parrot/variant",
+    # "pig/variant",
+    "pot_decorations",
+    "potion_contents",
+    "potion_duration_scale",
+    "profile",
+    "provides_banner_patterns",
+    "provides_trim_material",
+    # "rabbit/variant",
+    "rarity",
+    "recipes",
+    "repair_cost",
+    "repairable",
+    # "salmon/size",
+    # "sheep/color",
+    # "shulker/color",
+    "stored_enchantments",
+    "suspicious_stew_effects",
+    "tool",
+    "tooltip_display",
+    "tooltip_style",
+    "trim",
+    # "tropical_fish/base_color",
+    # "tropical_fish/pattern",
+    # "tropical_fish/pattern_color",
+    "unbreakable",
+    "use_cooldown",
+    "use_remainder",
+    # "villager/variant",
+    "weapon",
+    # "wolf/collar",
+    # "wolf/variant",
+    "writable_book_content",
+    "written_book_content"
+]
+
+registered_paths = []
+
+#>########### default pack stuff ###########<#
+
+def _add_tungsten_base():
+    if not _should_register("minecraft:load"):
+        return
+    append function_tag minecraft:load {"values":["bolt-item:load"]}
+    function bolt-item:load:
+        scoreboard objectives add bolt-item.head dummy
+        scoreboard objectives add bolt-item.chest dummy
+        scoreboard objectives add bolt-item.legs dummy
+        scoreboard objectives add bolt-item.feet dummy
+        scoreboard objectives add bolt-item.mainhand dummy
+        scoreboard objectives add bolt-item.offhand dummy
+
+    for slot, item_location in [
+        ("mainhand", "SelectedItem"),
+        ("offhand", "Inventory[{Slot:-106b}]"),
+        ("head", "Inventory[{Slot:103b}]"),
+        ("chest", "Inventory[{Slot:102b}]"),
+        ("legs", "Inventory[{Slot:101b}]"),
+        ("feet", "Inventory[{Slot:100b}]"),
+    ]:
+        function_path = f"bolt-item:tungsten/{slot}"
+        tungsten_path = f"tungsten:swap/{slot}"
+        unequip_tag_path = f"bolt-item:tungsten/{slot}/unequip"
+        equip_tag_path = f"bolt-item:tungsten/{slot}/equip"
+
+        append function_tag tungsten_path {"values":[function_path]}
+        function function_path:
+            function f"#{unequip_tag_path}"
+            store result score @s f"bolt-item.{slot}" data get entity @s f"{item_location}.components.'minecraft:custom_data'.bolt-item.hash"
+            function f"#{equip_tag_path}"
+
+def _add_regive_base():
+    if not _should_register("bolt-item:regive"):
+        return
+    function bolt-item:regive_mainhand:
+        item replace entity @s weapon.mainhand with air
+        $loot replace entity @s weapon.mainhand loot {"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"$(id)","functions":[{"function":"minecraft:set_count","count":$(count)},{"function":"minecraft:set_components","components":$(components)}]}]}]}
+
+    function bolt-item:regive_offhand:
+        item replace entity @s weapon.offhand with air
+        $loot replace entity @s weapon.offhand loot {"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"$(id)","functions":[{"function":"minecraft:set_count","count":$(count)},{"function":"minecraft:set_components","components":$(components)}]}]}]}
+
+#>########### transformers ###########<#
+
+def translate_item_name(cls, v) -> bool:
+    if type(v) != str:
+        return v
+    trans_string = f"item.{cls.namespace}.{cls.id}"
+    lang_file = f"{cls.namespace}:en_us"
+    lang = ctx.assets.languages.get(lang_file, {data:{}}).data
+    lang[trans_string] = v
+    ctx.assets.languages[lang_file] = Language(lang)
+    return {"translate":trans_string}
+
+#>########### decorators ###########<#
+
+def item(cls: type):
+    # copy components and decorators from parent
+    if cls.__bases__[0] != object:
+        for parent in cls.__bases__:
+            for k, v in parent.__dict__.items():
+                if (k not in cls.__dict__) and (
+                    (k in component_names) or
+                    (k.removesuffix('_transformer') in component_names) or
+                    (callable(v) and v.__dict__.get('decorator') and callable(v.decorator))
+                ):
+                    setattr(cls, k, v)
+
+    # ensure an id is set
+    if "id" not in cls.__dict__:
+        cls.id = _id_from_class_name(cls.__name__)
+    # store namespace for easy access
+    cls.namespace = cls.__module__.split(':')[0]
+    # create int hash from id
+    cls.hash = _int_hash(f"{cls.namespace}:{cls.id}")
+    # set up default component(s)
+    cls.components = {}
+
+    for k, v in cls.__dict__.items():
+        # transform and combine components
+        if k in component_names:
+            if f'{k}_transformer' in cls.__dict__:
+                v = getattr(cls, f'{k}_transformer')(cls, v)
+            cls.components[k] = v
+        # run decorator functions
+        elif callable(v) and 'decorator' in v.__dict__ and callable(v.decorator):
+            v.decorator(cls)
+    # add necessary bolt item custom data
+    cls.components["custom_data"] = cls.components.get("custom_data", {}) | {"bolt-item":{"id":f"{cls.namespace}:{cls.id}","hash":cls.hash}}
+
+    mc_components = _get_mc_components(cls.components)
+
+    def _loot_table(path: str = f'{cls.namespace}:{config["path_prefix"]}item/{cls.id}'):
+        loot_table path {"pools": [{ "rolls": 1, "entries": [{
+            "type": "minecraft:item",
+            "name": "minecraft:poisonous_potato",
+            "functions": [{
+                "function": "minecraft:set_components",
+                "components": mc_components
+            }]
+        }]}]}
+    cls.loot_table = _loot_table
+
+    def _recipe(recipe: list[list[str]] | list[str] | dict[str, str], path: str = f'{cls.namespace}:{config["path_prefix"]}item/{cls.id}'):
+        if type(recipe) == dict and 'input' in recipe and 'material' in recipe:
+            recipe path {
+                "type": "minecraft:crafting_transmute",
+                "input": recipe['input'],
+                "material": recipe['material'],
+                "result": {
+                    "id": "minecraft:poisonous_potato",
+                    "components": mc_components,
+                    "count": 1
+                }
+            }
+        elif type(recipe) == list and type(recipe[0]) == str:
+            recipe path {
+                "type": "minecraft:crafting_shapeless",
+                "ingredients": recipe,
+                "result": {
+                    "id": "minecraft:poisonous_potato",
+                    "components": mc_components,
+                    "count": 1
+                }
+            }
+        else:
+            item_pattern_map = {}
+            current = 97
+            pattern = recipe
+            for i, row in enumerate(recipe):
+                for j, item in enumerate(row):
+                    if item not in item_pattern_map:
+                        item_pattern_map[item] = chr(current)
+                        current += 1
+                    pattern[i][j] = item_pattern_map[item]
+
+            keys = {}
+            for k, v in item_pattern_map.items():
+                keys[v] = k
+
+            recipe_pattern = []
+            for row in pattern:
+                recipe_pattern.append("".join(row))
+
+            recipe path {
+                "type": "minecraft:crafting_shaped",
+                "pattern": recipe_pattern,
+                "key": keys,
+                "result": {
+                    "id": "minecraft:poisonous_potato",
+                    "components": mc_components,
+                    "count": 1
+                }
+            }
+    cls.recipe = _recipe
+
+    return cls
+
+def on_consume(return_item = False):
+    def decorator(func):
+        def on_consume_impl(cls: type):
+            path = f"{cls.namespace}:{config['path_prefix']}item/{cls.id}/on_consume/{func.__name__}"
+
+            advancement path {"criteria": { "criteria": {
+                "trigger": "minecraft:consume_item", "conditions": {
+                "item": { "predicates": { "minecraft:custom_data": {
+                    "bolt-item": { "id": f"{cls.namespace}:{cls.id}" }
+                }}}}}},
+                "rewards": { "function": path }
+            }
+
+            function path:
+                advancement revoke @s only path
+                if return_item:
+                    _add_regive_base()
+                    unless items entity @s weapon.mainhand *[minecraft:custom_data~{bolt-item:{id:(f"{cls.namespace}:{cls.id}")}}] function bolt-item:regive_offhand with entity @s Inventory[{Slot:-106b}]
+                    if items entity @s weapon.mainhand *[minecraft:custom_data~{bolt-item:{id:(f"{cls.namespace}:{cls.id}")}}] function bolt-item:regive_mainhand with entity @s SelectedItem
+                func()
+        func.decorator = on_consume_impl
+        return func
+    return decorator
+
+def on_equip(slot: str):
+    def decorator(func):
+        def on_equip_impl(cls: type):
+            _assert_is_slot(slot)
+            _add_tungsten_base()
+            _add_tungsten_components(cls, slot)
+            equip_tag_path = f"bolt-item:tungsten/{slot}/equip"
+            equip_function_path = f"{cls.namespace}:{config['path_prefix']}tungsten/{slot}/equip"
+            function_path = f"{cls.namespace}:{config['path_prefix']}item/{cls.id}/on_equip/{slot}/{func.__name__}"
+
+            if _should_register(equip_tag_path):
+                append function_tag equip_tag_path {"values":[equip_function_path]}
+            append function equip_function_path:
+                if score @s f"bolt-item.{slot}" matches (cls.hash) function function_path:
+                    func()
+        func.decorator = on_equip_impl
+        return func
+    return decorator
+
+def on_unequip(slot: str):
+    def decorator(func):
+        def on_unequip_impl(cls: type):
+            _assert_is_slot(slot)
+            _add_tungsten_base()
+            _add_tungsten_components(cls, slot)
+            unequip_tag_path = f"bolt-item:tungsten/{slot}/unequip"
+            unequip_function_path = f"{cls.namespace}:{config['path_prefix']}tungsten/{slot}/unequip"
+            function_path = f"{cls.namespace}:{config['path_prefix']}item/{cls.id}/on_unequip/{slot}/{func.__name__}"
+
+            if _should_register(unequip_tag_path):
+                append function_tag unequip_tag_path {"values":[unequip_function_path]}
+            append function unequip_function_path:
+                if score @s f"bolt-item.{slot}" matches (cls.hash) function function_path:
+                    func()
+        func.decorator = on_unequip_impl
+        return func
+    return decorator
+
+def on_attack(slot: str = "mainhand"):
+    def decorator(func):
+        def on_attack_impl(cls: type):
+            _assert_is_slot(slot)
+            _add_tungsten_base()
+            _add_tungsten_components(cls, slot)
+
+            function_path = f"{cls.namespace}:{config['path_prefix']}item/{cls.id}/on_attack/{slot}/{func.__name__}"
+            player_hurt_entity_function_path = f"{cls.namespace}:{config['path_prefix']}argon/player_hurt_entity"
+
+            if _should_register("argon:player_hurt_entity"):
+                append function_tag argon:player_hurt_entity {"values":[player_hurt_entity_function_path]}
+                function player_hurt_entity_function_path:
+                    on attacker store result score .check bolt-item.mainhand data get entity @s SelectedItem.components.minecraft:custom_data.bolt-item.hash
+                    on attacker store result score .check bolt-item.offhand data get entity @s Inventory[{Slot:-106b}].components.minecraft:custom_data.bolt-item.hash
+                    on attacker store result score .check bolt-item.head data get entity @s Inventory[{Slot:103b}].components.minecraft:custom_data.bolt-item.hash
+                    on attacker store result score .check bolt-item.chest data get entity @s Inventory[{Slot:102b}].components.minecraft:custom_data.bolt-item.hash
+                    on attacker store result score .check bolt-item.legs data get entity @s Inventory[{Slot:101b}].components.minecraft:custom_data.bolt-item.hash
+                    on attacker store result score .check bolt-item.feet data get entity @s Inventory[{Slot:100b}].components.minecraft:custom_data.bolt-item.hash
+
+            append function player_hurt_entity_function_path:
+                if score .check f"bolt-item.{slot}" matches (cls.hash) function function_path:
+                    func()
+        func.decorator = on_attack_impl
+        return func
+    return decorator
+
+def on_attacked(slot: str = "mainhand"):
+    def decorator(func):
+        def on_attacked_impl(cls: type):
+            _assert_is_slot(slot)
+
+            function_path = f"{cls.namespace}:{config['path_prefix']}item/{cls.id}/on_attacked/{slot}/{func.__name__}"
+            entity_hurt_player_function_path = f"{cls.namespace}:{config['path_prefix']}argon/entity_hurt_player"
+
+            if _should_register("argon:entity_hurt_player"):
+                append function_tag argon:entity_hurt_player {"values":[entity_hurt_player_function_path]}
+
+            slot_type = "armor"
+            if slot in ["mainhand","offhand"]:
+                slot_type = "weapon"
+
+            append function entity_hurt_player_function_path:
+                if items entity @s f"{slot_type}.{slot}" *[custom_data~{bolt-item:{id:f"{cls.namespace}:{cls.id}"}}] function function_path:
+                    func()
+        func.decorator = on_attacked_impl
+        return func
+    return decorator
+
+#>########### helpers ###########<#
+
+def _should_register(path):
+    global registered_paths
+    if path not in registered_paths:
+        registered_paths.append(path)
+        return True
+    return False
+
+def _id_from_class_name(name: str) -> str:
+    out_id = name[0].lower()
+    for c in name[1:]:
+        if c.isupper():
+            out_id += '_' + c.lower()
+        else:
+            out_id += c
+    return out_id
+
+def _assert_is_slot(slot: str):
+    if slot not in ["head","chest","legs","feet","mainhand","offhand"]:
+        raise Exception(f'[bolt-item]: "{slot}" is not a valid slot')
+
+def _add_tungsten_components(cls: type, slot: str):
+    attribute_modifiers_components = cls.components.get("attribute_modifiers") or []
+    tungsten_slot_registered = False
+    for modifier in attribute_modifiers_components:
+        if modifier["type"] == "minecraft:luck" and modifier["id"] == f"tungsten:{slot}":
+            tungsten_slot_registered = True
+            break
+    if not tungsten_slot_registered:
+        cls.components["attribute_modifiers"] = attribute_modifiers_components + [{"type":"minecraft:luck","id":f"tungsten:{slot}","amount":-9.094947017729282e-13,"operation":"add_value","slot":slot}]
+
+        if "tooltip_display" not in cls.components:
+            cls.components["tooltip_display"] = {hidden_components:["minecraft:attribute_modifiers"]}
+        elif "hidden_components" in cls.components["tooltip_display"] and "minecraft:attribute_modifiers" not in cls.components["tooltip_display"]["hidden_components"]:
+            cls.components["tooltip_display"]["hidden_components"] += ["minecraft:attribute_modifiers"]
+        elif "hidden_components" not in cls.components["tooltip_display"]:
+            cls.components["tooltip_display"]["hidden_components"] = ["minecraft:attribute_modifiers"]
+
+def _int_hash(s: str) -> int:
+    hash_object = sha512()
+    hash_object.update(s.encode('utf-8'))
+    hex_digest = hash_object.hexdigest()
+    int_digest = int(hex_digest, 16)
+    truncated_int = int_digest & 4294967295
+    if truncated_int > 2147483647:
+        truncated_int -= 4294967296
+    return truncated_int
+
+def _get_mc_components(components: type) -> dict:
+    cmpnts = {
+        "!minecraft:consumable": {},
+        "!minecraft:food": {},
+    }
+
+    for k, v in components.items():
+        cmpnts["minecraft:" + k] = v
+
+    if "minecraft:food" in cmpnts:
+        del cmpnts["!minecraft:food"]
+    if "minecraft:consumable" in cmpnts:
+        del cmpnts["!minecraft:consumable"]
+
+    return cmpnts
