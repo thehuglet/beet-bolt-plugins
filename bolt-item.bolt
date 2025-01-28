@@ -1,5 +1,6 @@
 from beet import Language
 from hashlib import sha512
+from typing import Hashable
 
 config = {
     "path_prefix": ctx.meta.get("bolt-item",{}).get("path_prefix") or "bolt-item/",
@@ -147,6 +148,20 @@ def _add_regive_base():
         item replace entity @s weapon.offhand with air
         $loot replace entity @s weapon.offhand loot {"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"$(id)","functions":[{"function":"minecraft:set_count","count":$(count)},{"function":"minecraft:set_components","components":$(components)}]}]}]}
 
+#>########### classes ###########<#
+
+class ComponentProxy:
+    __mode__ = 'all'
+    def __setattr__(self, name, value):
+        if name == '__mode__' or self.__mode__ == 'all':
+            self.__dict__[name] = value
+        elif (self.__mode__ == 'merge') and (name in component_names):
+            self.__dict__[name] = deep_merge(getattr(self, name, getattr(self.__class__, name, None)), value)
+        elif (self.__mode__ == 'set') and (name in component_names):
+            self.__dict__[name] = value
+        else:
+            raise Exception(f'[bolt-item]: "{name}" is not a valid component')
+
 #>########### transformers ###########<#
 
 def translate_item_name(cls, v) -> bool:
@@ -162,40 +177,72 @@ def translate_item_name(cls, v) -> bool:
 #>########### decorators ###########<#
 
 def item(cls: type):
-    # copy components and decorators from parent
     if cls.__bases__[0] != object:
         for parent in cls.__bases__:
+            # gather custom components
+            custom_components = []
+            for k, v in parent.__dict__.items():
+                if (k not in cls.__dict__) and (callable(v) and 'custom_component' in v.__dict__):
+                    custom_components.append(v.custom_component)
+            # copy from parent
             for k, v in parent.__dict__.items():
                 if (k not in cls.__dict__) and (
                     (k in component_names) or
-                    (k.removesuffix('_transformer') in component_names) or
+                    (k in custom_components) or
+                    (callable(v) and 'transforms_component' in v.__dict__) or
+                    (callable(v) and 'custom_component' in v.__dict__) or
                     (callable(v) and v.__dict__.get('decorator') and callable(v.decorator))
                 ):
                     setattr(cls, k, v)
 
+    # initialize component proxy
+    cls.component_proxy = ComponentProxy()
     # ensure an id is set
     if "id" not in cls.__dict__:
         cls.id = _id_from_class_name(cls.__name__)
+    cls.component_proxy.id = cls.id
     # store namespace for easy access
     cls.namespace = cls.__module__.split(':')[0]
+    cls.component_proxy.namespace = cls.namespace
     # create int hash from id
     cls.hash = _int_hash(f"{cls.namespace}:{cls.id}")
-    # set up default component(s)
-    cls.components = {}
+    cls.component_proxy.hash = cls.hash
+    # lock component proxy
+    cls.component_proxy.__mode__ = 'merge'
 
+    # create transformer map and gather custom components
+    callables = []
+    def get_priority(f):
+        return f.priority
     for k, v in cls.__dict__.items():
-        # transform and combine components
-        if k in component_names:
-            if f'{k}_transformer' in cls.__dict__:
-                v = getattr(cls, f'{k}_transformer')(cls, v)
-            cls.components[k] = v
-        # run decorator functions
-        elif callable(v) and 'decorator' in v.__dict__ and callable(v.decorator):
-            v.decorator(cls)
-    # add necessary bolt item custom data
-    cls.components["custom_data"] = cls.components.get("custom_data", {}) | {"bolt-item":{"id":f"{cls.namespace}:{cls.id}","hash":cls.hash}}
+        if callable(v) and ('transforms_component' in v.__dict__ or 'custom_component' in v.__dict__):
+            callables.append(v)
+    callables.sort(key=get_priority)
 
-    mc_components = _get_mc_components(cls.components)
+    # set from class
+    for k, v in cls.__dict__.items():
+        if k in component_names:
+            setattr(cls.component_proxy, k, v)
+
+    # run all callables
+    for c in callables:
+        # transfromers can replace components
+        if 'transforms_component' in c.__dict__:
+            res = c(cls.component_proxy, getattr(cls.component_proxy, c.transforms_component, None))
+            cls.component_proxy.__mode__ = 'set'
+            setattr(cls.component_proxy, c.transforms_component, res)
+            cls.component_proxy.__mode__ = 'merge'
+        # custom components arent real components
+        if 'custom_component' in c.__dict__:
+            c(cls.component_proxy, getattr(cls, c.custom_component, None))
+        # run decorators
+        if 'decorator' in c.__dict__:
+            c(cls.component_proxy)
+
+    # add necessary bolt item custom data
+    setattr(cls.component_proxy, "custom_data", {"bolt-item":{"id":f"{cls.namespace}:{cls.id}","hash":cls.hash}})
+
+    cls.components = _get_mc_components(cls.component_proxy)
 
     def _loot_table(path: str = f'{cls.namespace}:{config["path_prefix"]}item/{cls.id}'):
         loot_table path {"pools": [{ "rolls": 1, "entries": [{
@@ -203,7 +250,7 @@ def item(cls: type):
             "name": "minecraft:poisonous_potato",
             "functions": [{
                 "function": "minecraft:set_components",
-                "components": mc_components
+                "components": cls.components
             }]
         }]}]}
     cls.loot_table = _loot_table
@@ -216,7 +263,7 @@ def item(cls: type):
                 "material": recipe['material'],
                 "result": {
                     "id": "minecraft:poisonous_potato",
-                    "components": mc_components,
+                    "components": cls.components,
                     "count": 1
                 }
             }
@@ -226,7 +273,7 @@ def item(cls: type):
                 "ingredients": recipe,
                 "result": {
                     "id": "minecraft:poisonous_potato",
-                    "components": mc_components,
+                    "components": cls.components,
                     "count": 1
                 }
             }
@@ -255,7 +302,7 @@ def item(cls: type):
                 "key": keys,
                 "result": {
                     "id": "minecraft:poisonous_potato",
-                    "components": mc_components,
+                    "components": cls.components,
                     "count": 1
                 }
             }
@@ -263,15 +310,31 @@ def item(cls: type):
 
     return cls
 
-def on_consume(return_item = False):
+def transformer(component: str, priority = 0):
+    if component not in component_names:
+        raise Exception(f'[bolt-item]: "{component}" is not a valid component name')
     def decorator(func):
-        def on_consume_impl(cls: type):
-            path = f"{cls.namespace}:{config['path_prefix']}item/{cls.id}/on_consume/{func.__name__}"
+        func.transforms_component = component
+        func.priority = priority
+        return func
+    return decorator
+
+def custom_component(component: str, priority = 1):
+    def decorator(func):
+        func.custom_component = component
+        func.priority = priority
+        return func
+    return decorator
+
+def on_consume(return_item = False, priority = 10):
+    def decorator(func):
+        def on_consume_impl(proxy: ComponentProxy):
+            path = f"{proxy.namespace}:{config['path_prefix']}item/{proxy.id}/on_consume/{func.__name__}"
 
             advancement path {"criteria": { "criteria": {
                 "trigger": "minecraft:consume_item", "conditions": {
                 "item": { "predicates": { "minecraft:custom_data": {
-                    "bolt-item": { "id": f"{cls.namespace}:{cls.id}" }
+                    "bolt-item": { "id": f"{proxy.namespace}:{proxy.id}" }
                 }}}}}},
                 "rewards": { "function": path }
             }
@@ -280,60 +343,63 @@ def on_consume(return_item = False):
                 advancement revoke @s only path
                 if return_item:
                     _add_regive_base()
-                    unless items entity @s weapon.mainhand *[minecraft:custom_data~{bolt-item:{id:(f"{cls.namespace}:{cls.id}")}}] function bolt-item:regive_offhand with entity @s Inventory[{Slot:-106b}]
-                    if items entity @s weapon.mainhand *[minecraft:custom_data~{bolt-item:{id:(f"{cls.namespace}:{cls.id}")}}] function bolt-item:regive_mainhand with entity @s SelectedItem
+                    unless items entity @s weapon.mainhand *[minecraft:custom_data~{bolt-item:{id:(f"{proxy.namespace}:{proxy.id}")}}] function bolt-item:regive_offhand with entity @s Inventory[{Slot:-106b}]
+                    if items entity @s weapon.mainhand *[minecraft:custom_data~{bolt-item:{id:(f"{proxy.namespace}:{proxy.id}")}}] function bolt-item:regive_mainhand with entity @s SelectedItem
                 func()
-        func.decorator = on_consume_impl
-        return func
+        on_consume_impl.decorator = "on_consume"
+        on_consume_impl.priority = priority
+        return on_consume_impl
     return decorator
 
-def on_equip(slot: str):
+def on_equip(slot: str, priority = 10):
     def decorator(func):
-        def on_equip_impl(cls: type):
+        def on_equip_impl(proxy: ComponentProxy):
             _assert_is_slot(slot)
             _add_tungsten_base()
-            _add_tungsten_components(cls, slot)
+            _add_tungsten_components(proxy, slot)
             equip_tag_path = f"bolt-item:tungsten/{slot}/equip"
-            equip_function_path = f"{cls.namespace}:{config['path_prefix']}tungsten/{slot}/equip"
-            function_path = f"{cls.namespace}:{config['path_prefix']}item/{cls.id}/on_equip/{slot}/{func.__name__}"
+            equip_function_path = f"{proxy.namespace}:{config['path_prefix']}tungsten/{slot}/equip"
+            function_path = f"{proxy.namespace}:{config['path_prefix']}item/{proxy.id}/on_equip/{slot}/{func.__name__}"
 
             if _should_register(equip_tag_path):
                 append function_tag equip_tag_path {"values":[equip_function_path]}
             append function equip_function_path:
-                if score @s f"bolt-item.{slot}" matches (cls.hash) function function_path:
+                if score @s f"bolt-item.{slot}" matches (proxy.hash) function function_path:
                     func()
-        func.decorator = on_equip_impl
-        return func
+        on_equip_impl.decorator = "on_equip"
+        on_equip_impl.priority = priority
+        return on_equip_impl
     return decorator
 
-def on_unequip(slot: str):
+def on_unequip(slot: str, priority = 10):
     def decorator(func):
-        def on_unequip_impl(cls: type):
+        def on_unequip_impl(proxy: ComponentProxy):
             _assert_is_slot(slot)
             _add_tungsten_base()
-            _add_tungsten_components(cls, slot)
+            _add_tungsten_components(proxy, slot)
             unequip_tag_path = f"bolt-item:tungsten/{slot}/unequip"
-            unequip_function_path = f"{cls.namespace}:{config['path_prefix']}tungsten/{slot}/unequip"
-            function_path = f"{cls.namespace}:{config['path_prefix']}item/{cls.id}/on_unequip/{slot}/{func.__name__}"
+            unequip_function_path = f"{proxy.namespace}:{config['path_prefix']}tungsten/{slot}/unequip"
+            function_path = f"{proxy.namespace}:{config['path_prefix']}item/{proxy.id}/on_unequip/{slot}/{func.__name__}"
 
             if _should_register(unequip_tag_path):
                 append function_tag unequip_tag_path {"values":[unequip_function_path]}
             append function unequip_function_path:
-                if score @s f"bolt-item.{slot}" matches (cls.hash) function function_path:
+                if score @s f"bolt-item.{slot}" matches (proxy.hash) function function_path:
                     func()
-        func.decorator = on_unequip_impl
-        return func
+        on_unequip_impl.decorator = "on_unequip"
+        on_unequip_impl.priority = priority
+        return on_unequip_impl
     return decorator
 
-def on_attack(slot: str = "mainhand"):
+def on_attack(slot: str = "mainhand", priority = 10):
     def decorator(func):
-        def on_attack_impl(cls: type):
+        def on_attack_impl(proxy: ComponentProxy):
             _assert_is_slot(slot)
             _add_tungsten_base()
-            _add_tungsten_components(cls, slot)
+            _add_tungsten_components(proxy, slot)
 
-            function_path = f"{cls.namespace}:{config['path_prefix']}item/{cls.id}/on_attack/{slot}/{func.__name__}"
-            player_hurt_entity_function_path = f"{cls.namespace}:{config['path_prefix']}argon/player_hurt_entity"
+            function_path = f"{proxy.namespace}:{config['path_prefix']}item/{proxy.id}/on_attack/{slot}/{func.__name__}"
+            player_hurt_entity_function_path = f"{proxy.namespace}:{config['path_prefix']}argon/player_hurt_entity"
 
             if _should_register("argon:player_hurt_entity"):
                 append function_tag argon:player_hurt_entity {"values":[player_hurt_entity_function_path]}
@@ -346,19 +412,20 @@ def on_attack(slot: str = "mainhand"):
                     on attacker store result score .check bolt-item.feet data get entity @s Inventory[{Slot:100b}].components.minecraft:custom_data.bolt-item.hash
 
             append function player_hurt_entity_function_path:
-                if score .check f"bolt-item.{slot}" matches (cls.hash) function function_path:
+                if score .check f"bolt-item.{slot}" matches (proxy.hash) function function_path:
                     func()
-        func.decorator = on_attack_impl
-        return func
+        on_attack_impl.decorator = "on_attack"
+        on_attack_impl.priority = priority
+        return on_attack_impl
     return decorator
 
-def on_attacked(slot: str = "mainhand"):
+def on_attacked(slot: str = "mainhand", priority = 10):
     def decorator(func):
-        def on_attacked_impl(cls: type):
+        def on_attacked_impl(proxy: ComponentProxy):
             _assert_is_slot(slot)
 
-            function_path = f"{cls.namespace}:{config['path_prefix']}item/{cls.id}/on_attacked/{slot}/{func.__name__}"
-            entity_hurt_player_function_path = f"{cls.namespace}:{config['path_prefix']}argon/entity_hurt_player"
+            function_path = f"{proxy.namespace}:{config['path_prefix']}item/{proxy.id}/on_attacked/{slot}/{func.__name__}"
+            entity_hurt_player_function_path = f"{proxy.namespace}:{config['path_prefix']}argon/entity_hurt_player"
 
             if _should_register("argon:entity_hurt_player"):
                 append function_tag argon:entity_hurt_player {"values":[entity_hurt_player_function_path]}
@@ -368,13 +435,41 @@ def on_attacked(slot: str = "mainhand"):
                 slot_type = "weapon"
 
             append function entity_hurt_player_function_path:
-                if items entity @s f"{slot_type}.{slot}" *[custom_data~{bolt-item:{id:f"{cls.namespace}:{cls.id}"}}] function function_path:
+                if items entity @s f"{slot_type}.{slot}" *[custom_data~{bolt-item:{id:f"{proxy.namespace}:{proxy.id}"}}] function function_path:
                     func()
-        func.decorator = on_attacked_impl
-        return func
+        on_attacked_impl.decorator = "on_attacked"
+        on_attacked_impl.priority = priority
+        return on_attacked_impl
     return decorator
 
 #>########### helpers ###########<#
+
+def deep_merge(base, result):
+    if base == None:
+        return result
+    if result == None:
+        return base
+    if not (isinstance(base, dict) and isinstance(result, dict)):
+        if isinstance(base, list) and isinstance(result, list):
+            return _combine_lists(base, result)
+        return result
+    for k, v in result.items():
+        if k in base:
+            if isinstance(v, dict) and isinstance(base[k], dict):
+                base[k] = deep_merge(base[k], v)
+            elif isinstance(v, list) and isinstance(base[k], list):
+                base[k] = _combine_lists(base[k], v)
+            else:
+                base[k] = v
+        else:
+            base[k] = v
+    return base
+
+def _combine_lists(l1, l2):
+    for e in (l1 + l2):
+        if not isinstance(e, Hashable):
+            return l1 + l2
+    return list(set(l1 + l2))
 
 def _should_register(path):
     global registered_paths
@@ -396,22 +491,16 @@ def _assert_is_slot(slot: str):
     if slot not in ["head","chest","legs","feet","mainhand","offhand"]:
         raise Exception(f'[bolt-item]: "{slot}" is not a valid slot')
 
-def _add_tungsten_components(cls: type, slot: str):
-    attribute_modifiers_components = cls.components.get("attribute_modifiers") or []
+def _add_tungsten_components(proxy: ComponentProxy, slot: str):
+    attribute_modifiers_components = getattr(proxy, "attribute_modifiers", [])
     tungsten_slot_registered = False
     for modifier in attribute_modifiers_components:
         if modifier["type"] == "minecraft:luck" and modifier["id"] == f"tungsten:{slot}":
             tungsten_slot_registered = True
             break
     if not tungsten_slot_registered:
-        cls.components["attribute_modifiers"] = attribute_modifiers_components + [{"type":"minecraft:luck","id":f"tungsten:{slot}","amount":-9.094947017729282e-13,"operation":"add_value","slot":slot}]
-
-        if "tooltip_display" not in cls.components:
-            cls.components["tooltip_display"] = {hidden_components:["minecraft:attribute_modifiers"]}
-        elif "hidden_components" in cls.components["tooltip_display"] and "minecraft:attribute_modifiers" not in cls.components["tooltip_display"]["hidden_components"]:
-            cls.components["tooltip_display"]["hidden_components"] += ["minecraft:attribute_modifiers"]
-        elif "hidden_components" not in cls.components["tooltip_display"]:
-            cls.components["tooltip_display"]["hidden_components"] = ["minecraft:attribute_modifiers"]
+        proxy.attribute_modifiers = [{"type":"minecraft:luck","id":f"tungsten:{slot}","amount":-9.094947017729282e-13,"operation":"add_value","slot":slot}]
+        proxy.tooltip_display = {"hidden_components":["minecraft:attribute_modifiers"]}
 
 def _int_hash(s: str) -> int:
     hash_object = sha512()
@@ -423,13 +512,15 @@ def _int_hash(s: str) -> int:
         truncated_int -= 4294967296
     return truncated_int
 
-def _get_mc_components(components: type) -> dict:
+def _get_mc_components(proxy: ComponentProxy) -> dict:
     cmpnts = {
         "!minecraft:consumable": {},
         "!minecraft:food": {},
     }
 
-    for k, v in components.items():
+    for k, v in proxy.__dict__.items():
+        if k not in component_names or v == None:
+            continue
         cmpnts["minecraft:" + k] = v
 
     if "minecraft:food" in cmpnts:
