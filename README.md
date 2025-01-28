@@ -28,7 +28,6 @@ MyAwesomeItem.recipe([
     ["diamond", "iron_ingot", "diamond"],
 ])
 ```
-
 The `.loot_table` method can also take a path as an argument to overwrite the default path.
 
 The `.recipe` method takes either a shaped recipe like shown above, a list of ingredients (`["iron_ingot","#logs"]`) for a shapeless recipe or a dict with `input` and `material` (`{"input":"netherite_sword","material":"#cat_food"}`) for a crafting transmute recipe.
@@ -36,17 +35,35 @@ The `.recipe` method can also take a path as an argument to overwrite the defaul
 
 ### Component Transformers
 ```py
-def prefix_item_name(cls, v):
-    return f'{cls.custom_prefix} {v}'
-
 @item
 class PrefixedNameItem:
     item_name = "Regular Name"
-    custom_prefix = "[SPECIAL]"
-    item_name_transformer = prefix_item_name
-```
 
-A transformer is a function that takes the class and the original value as parameters and just outputs what that component should be instead. This can be used to translate text, manage textures or what ever you can think of.
+    @transformer(component = "item_name")
+    def prefix_item_name(proxy, value):
+        return f'[SPECIAL] {value}'
+```
+A transformer is a decorated function that takes the class and the original value as parameters and just outputs what that component should be instead.
+This can be used to translate text, manage textures or what ever you can think of.
+
+Like other function decorators, the `@transformer` decorator can provide a `priority`.
+By default transformers have a priority of 1000 (Run early in the pipeline).
+
+### Custom Components
+```py
+@item
+class CoolSword:
+    stats = {"Attack Damage":10,"Attack Speed":1.6}
+
+    @custom_component(component = "stats")
+    def stats_component(proxy, data):
+        for stat, amount in data["stats"]:
+            proxy.lore = [[{"text":stat},{"text":" "},{"text":str(amount}]]
+```
+A custom component takes a specified field of the item class and can create vanilla components using that data.
+
+Like other function decorators, the `@custom_component` decorator can provide a `priority`.
+By default custom component functions have a priority of 500 (Run after transformers).
 
 ### Method Decorators
 ```py
@@ -67,6 +84,9 @@ By default `@on_consume`, `@on_equip`, `@on_unequip`, `@on_attack` and `@on_atta
 
 `@on_equip`, `@on_unequip`, `@on_attack` and `@on_attacked` each can take a `slot` string argument to determine where the item should be kept in order for the method/function to be triggered.
 
+Like other function decorators, these decorators can provide a `priority`.
+By default their priority is set to 0 (Runing after other decorators).
+
 ### Inheritance
 ```py
 class MyPackItem:
@@ -77,4 +97,4 @@ class FakeDiamond(MyPackItem):
     item_model = "diamond"
     item_name = "Ultra Very Real Diamond, Trust"
 ```
-Components, Transformers and decorated methods/functions are inherrited from parent classes, even if they don't include the `@item` decorator.
+Components, transformers, custom component functions and decorated methods/functions are inherrited from parent classes, even if they don't include the `@item` decorator.
