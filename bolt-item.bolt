@@ -218,6 +218,7 @@ def item(cls: type):
         if callable(v) and ('transforms_component' in v.__dict__ or 'custom_component' in v.__dict__):
             callables.append(v)
     callables.sort(key=get_priority)
+    callables.reverse()
 
     # set from class
     for k, v in cls.__dict__.items():
@@ -310,7 +311,7 @@ def item(cls: type):
 
     return cls
 
-def transformer(component: str, priority = 0):
+def transformer(component: str, priority = 1000):
     if component not in component_names:
         raise Exception(f'[bolt-item]: "{component}" is not a valid component name')
     def decorator(func):
@@ -319,14 +320,14 @@ def transformer(component: str, priority = 0):
         return func
     return decorator
 
-def custom_component(component: str, priority = 1):
+def custom_component(component: str, priority = 500):
     def decorator(func):
         func.custom_component = component
         func.priority = priority
         return func
     return decorator
 
-def on_consume(return_item = False, priority = 10):
+def on_consume(return_item = False, priority = 0):
     def decorator(func):
         def on_consume_impl(proxy: ComponentProxy):
             path = f"{proxy.namespace}:{config['path_prefix']}item/{proxy.id}/on_consume/{func.__name__}"
@@ -351,7 +352,7 @@ def on_consume(return_item = False, priority = 10):
         return on_consume_impl
     return decorator
 
-def on_equip(slot: str, priority = 10):
+def on_equip(slot: str, priority = 0):
     def decorator(func):
         def on_equip_impl(proxy: ComponentProxy):
             _assert_is_slot(slot)
@@ -371,7 +372,7 @@ def on_equip(slot: str, priority = 10):
         return on_equip_impl
     return decorator
 
-def on_unequip(slot: str, priority = 10):
+def on_unequip(slot: str, priority = 0):
     def decorator(func):
         def on_unequip_impl(proxy: ComponentProxy):
             _assert_is_slot(slot)
@@ -391,7 +392,7 @@ def on_unequip(slot: str, priority = 10):
         return on_unequip_impl
     return decorator
 
-def on_attack(slot: str = "mainhand", priority = 10):
+def on_attack(slot: str = "mainhand", priority = 0):
     def decorator(func):
         def on_attack_impl(proxy: ComponentProxy):
             _assert_is_slot(slot)
@@ -419,7 +420,7 @@ def on_attack(slot: str = "mainhand", priority = 10):
         return on_attack_impl
     return decorator
 
-def on_attacked(slot: str = "mainhand", priority = 10):
+def on_attacked(slot: str = "mainhand", priority = 0):
     def decorator(func):
         def on_attacked_impl(proxy: ComponentProxy):
             _assert_is_slot(slot)
